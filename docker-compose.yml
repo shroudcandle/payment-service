@@ -1,0 +1,144 @@
+name: payment-service
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-environment: &app_environment
+  APP_ENV: ${APP_ENV:-production}
+  DEBUG: ${DEBUG:-false}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+  API_KEY: ${API_KEY:?API_KEY must be set}
+  POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+  POSTGRES_DB: ${POSTGRES_DB:-payments_db}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-payments_db}
+  RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set}
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set}@rabbitmq:5672/
+  OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-0.5}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+  OUTBOX_LEASE_SECONDS: ${OUTBOX_LEASE_SECONDS:-30.0}
+  RELAY_RESTART_DELAY_SECONDS: ${RELAY_RESTART_DELAY_SECONDS:-5.0}
+  MAX_DELIVERY_ATTEMPTS: ${MAX_DELIVERY_ATTEMPTS:-3}
+  RETRY_BASE: ${RETRY_BASE:-2.0}
+  RETRY_CAP: ${RETRY_CAP:-30.0}
+  WEBHOOK_STRICT_SECURITY: ${WEBHOOK_STRICT_SECURITY:-true}
+  WEBHOOK_ALLOWED_HOSTS: ${WEBHOOK_ALLOWED_HOSTS:-}
+  WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-5.0}
+  HTTP_MAX_CONNECTIONS: ${HTTP_MAX_CONNECTIONS:-100}
+  HTTP_MAX_KEEPALIVE_CONNECTIONS: ${HTTP_MAX_KEEPALIVE_CONNECTIONS:-20}
+  HTTP_KEEPALIVE_EXPIRY: ${HTTP_KEEPALIVE_EXPIRY:-10.0}
+  HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-10.0}
+  HTTP_CONNECT_TIMEOUT_SECONDS: ${HTTP_CONNECT_TIMEOUT_SECONDS:-5.0}
+  RABBITMQ_HEALTH_TIMEOUT_SECONDS: ${RABBITMQ_HEALTH_TIMEOUT_SECONDS:-1.0}
+  GATEWAY_MIN_DELAY: ${GATEWAY_MIN_DELAY:-2.0}
+  GATEWAY_MAX_DELAY: ${GATEWAY_MAX_DELAY:-5.0}
+  GATEWAY_SUCCESS_RATE: ${GATEWAY_SUCCESS_RATE:-0.9}
+
+x-app-hardening: &app_hardening
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: *default-logging
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-payments_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-payments_db}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *default-logging
+    networks:
+      - payments
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: *default-logging
+    networks:
+      - payments
+
+  api:
+    <<: *app_hardening
+    build:
+      context: .
+      target: runtime
+    environment: *app_environment
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; request = urllib.request.Request('http://localhost:8000/health/live', headers={'X-API-Key': os.environ['API_KEY']}); urllib.request.urlopen(request, timeout=2)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - payments
+
+  worker:
+    <<: *app_hardening
+    build:
+      context: .
+      target: runtime
+    command: ["python", "-m", "payment_service.main_worker"]
+    environment: *app_environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - payments
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+
+networks:
+  payments:
+    driver: bridge

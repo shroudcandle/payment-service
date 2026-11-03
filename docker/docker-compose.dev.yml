@@ -1,0 +1,36 @@
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  rabbitmq:
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+
+  api:
+    command:
+      - uvicorn
+      - payment_service.presentation.api.app:create_app
+      - --factory
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+    environment:
+      APP_ENV: local
+      DEBUG: "true"
+      OUTBOX_POLL_INTERVAL: "0.1"
+      WEBHOOK_STRICT_SECURITY: "false"
+    volumes:
+      - ./src:/app/src:ro
+
+  worker:
+    environment:
+      APP_ENV: local
+      DEBUG: "true"
+      OUTBOX_POLL_INTERVAL: "0.1"
+      WEBHOOK_STRICT_SECURITY: "false"
+    volumes:
+      - ./src:/app/src:ro
